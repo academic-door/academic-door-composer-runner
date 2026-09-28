@@ -31,11 +31,19 @@ def validate(text: str) -> None:
     if missing:
         raise SystemExit(f"missing required controller contract: {missing}")
 
-    forbidden = [
+    on_block = text.split("permissions:", 1)[0]
+    forbidden_triggers = [
+        "pull_request:",
         "pull_request_target:",
         "repository_dispatch:",
         "issue_comment:",
         "workflow_run:",
+    ]
+    present_triggers = [value for value in forbidden_triggers if value in on_block]
+    if present_triggers:
+        raise SystemExit(f"forbidden production trigger surface: {present_triggers}")
+
+    forbidden = [
         "actions/upload-artifact",
         "repository: ${{",
         "ref: ${{ inputs.",
@@ -44,10 +52,6 @@ def validate(text: str) -> None:
     present = [value for value in forbidden if value in text]
     if present:
         raise SystemExit(f"forbidden production-controller surface: {present}")
-
-    on_block = text.split("permissions:", 1)[0]
-    if "pull_request:" in on_block:
-        raise SystemExit("production reconcile must not run on pull_request")
 
     if "contents: write" in text:
         raise SystemExit("production reconcile must not require public-repo contents write")
