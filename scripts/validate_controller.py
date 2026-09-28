@@ -11,7 +11,7 @@ WORKFLOW = Path(".github/workflows/reconcile.yml")
 def validate(text: str) -> None:
     required = [
         "workflow_dispatch:",
-        'cron: "11 * * * *"',
+        'cron: "25 * * * *"',
         "SOURCE_REPO: academic-door/academic-door-composer",
         "environment: production",
         "repository: academic-door/academic-door-composer",

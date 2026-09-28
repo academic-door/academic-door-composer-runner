@@ -3,7 +3,7 @@ name: Reconcile Composer production
 on:
   workflow_dispatch:
   schedule:
-    - cron: "11 * * * *"
+    - cron: "25 * * * *"
 
 permissions:
   contents: read
