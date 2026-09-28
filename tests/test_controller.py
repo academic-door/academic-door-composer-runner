@@ -36,6 +36,15 @@ class ControllerContractTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             module.validate(mutated)
 
+    def test_workflow_run_trigger_is_rejected_but_marker_key_is_allowed(self) -> None:
+        module.validate(self.workflow)
+        mutated = self.workflow.replace(
+            "  workflow_dispatch:\n",
+            "  workflow_dispatch:\n  workflow_run:\n",
+        )
+        with self.assertRaises(SystemExit):
+            module.validate(mutated)
+
     def test_artifact_persistence_is_rejected(self) -> None:
         mutated = self.workflow + "\n# actions/upload-artifact\n"
         with self.assertRaises(SystemExit):
