@@ -1,0 +1,222 @@
+name: Reconcile Composer production
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "11 * * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: composer-production-reconcile
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: academic-door/academic-door-composer
+  RUNTIME_ORIGIN: https://academic-door-composer.academic-door.workers.dev
+  STATE_ISSUE_TITLE: "[runtime-state] Composer production acceptance"
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    steps:
+      - name: Check out trusted runner controller
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate public-runner controller contract
+        run: python scripts/validate_controller.py
+
+      - name: Resolve canonical private Composer main
+        id: source
+        env:
+          GH_TOKEN: ${{ secrets.COMPOSER_SOURCE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(gh api "repos/${SOURCE_REPO}/commits/main" --jq '.sha')"
+          if ! printf '%s\n' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Failed to resolve canonical private Composer main SHA."
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_OBSERVED=$sha" >> "$GITHUB_ENV"
+          echo "SOURCE_OBSERVED: $sha" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Read last runtime acceptance marker
+        id: accepted
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue_number="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues?state=all&per_page=100" \
+              | jq -r --arg title "$STATE_ISSUE_TITLE" \
+                '.[] | select(.title == $title and (has("pull_request") | not)) | .number' \
+              | head -n 1
+          )"
+          accepted_sha=""
+          accepted="false"
+          if [ -n "$issue_number" ]; then
+            body="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --jq '.body')"
+            if printf '%s\n' "$body" | jq -e . >/dev/null 2>&1; then
+              accepted_sha="$(printf '%s\n' "$body" | jq -r '.source_sha // ""')"
+              accepted="$(printf '%s\n' "$body" | jq -r '.accepted // false')"
+            fi
+          fi
+          echo "issue_number=$issue_number" >> "$GITHUB_OUTPUT"
+          echo "sha=$accepted_sha" >> "$GITHUB_OUTPUT"
+          echo "accepted=$accepted" >> "$GITHUB_OUTPUT"
+
+      - name: Decide reconcile state
+        id: reconcile
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          ACCEPTED_SHA: ${{ steps.accepted.outputs.sha }}
+          ACCEPTED: ${{ steps.accepted.outputs.accepted }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$ACCEPTED" = "true" ] && [ "$SOURCE_SHA" = "$ACCEPTED_SHA" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "NO_CHANGE: ${SOURCE_SHA} is already runtime-accepted." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "RECONCILE_REQUIRED: ${SOURCE_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check out exact private Composer SHA
+        if: steps.reconcile.outputs.changed == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: academic-door/academic-door-composer
+          ref: ${{ steps.source.outputs.sha }}
+          token: ${{ secrets.COMPOSER_SOURCE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: composer
+
+      - uses: actions/setup-node@v6
+        if: steps.reconcile.outputs.changed == 'true'
+        with:
+          node-version: "24"
+
+      - name: Validate Composer bundle
+        if: steps.reconcile.outputs.changed == 'true'
+        working-directory: composer
+        run: python scripts/validate_bundle.py --site site
+
+      - name: Validate Worker and D1 config
+        if: steps.reconcile.outputs.changed == 'true'
+        working-directory: composer
+        run: npx --yes wrangler@4.107.0 deploy --dry-run --config wrangler.jsonc --outdir .wrangler-dry-run
+
+      - name: Run Composer Python regression
+        if: steps.reconcile.outputs.changed == 'true'
+        working-directory: composer
+        run: python -m unittest discover -s tests -v
+
+      - name: Run Composer browser-independent UI regression
+        if: steps.reconcile.outputs.changed == 'true'
+        working-directory: composer
+        run: node --test tests/*.test.mjs
+
+      - name: Deploy exact Composer SHA to Cloudflare Workers
+        if: steps.reconcile.outputs.changed == 'true'
+        working-directory: composer
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4.107.0 deploy --config wrangler.jsonc
+
+      - name: Apply publication ledger migrations
+        if: steps.reconcile.outputs.changed == 'true'
+        working-directory: composer
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4.107.0 d1 migrations apply PUBLICATIONS_DB --remote --config wrangler.jsonc
+
+      - name: Verify authenticated-private Access boundary
+        if: steps.reconcile.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in "/" "/data/index.json" "/api/publications"; do
+            headers="$(mktemp)"
+            body="$(mktemp)"
+            status="$(curl --silent --show-error --max-time 20 \
+              --output "$body" \
+              --dump-header "$headers" \
+              --write-out '%{http_code}' \
+              "${RUNTIME_ORIGIN}${path}")"
+            location="$(awk 'BEGIN { IGNORECASE=1 } /^location:/ { sub(/^location:[[:space:]]*/, ""); gsub("\r", ""); print; exit }' "$headers")"
+            rm -f "$headers" "$body"
+
+            case "$status" in
+              301|302|303|307|308) ;;
+              *)
+                echo "::error::Unauthenticated ${path} was not challenged by Cloudflare Access (HTTP ${status})."
+                exit 1
+                ;;
+            esac
+
+            case "$location" in
+              https://*.cloudflareaccess.com/*|*/cdn-cgi/access/*)
+                echo "Private Access challenge verified for ${path} (HTTP ${status})."
+                ;;
+              *)
+                echo "::error::Unauthenticated ${path} redirected somewhere other than Cloudflare Access."
+                exit 1
+                ;;
+            esac
+          done
+          echo "DEPLOYED: ${SOURCE_OBSERVED}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Persist public-safe runtime acceptance marker
+        if: steps.reconcile.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          STATE_ISSUE_NUMBER: ${{ steps.accepted.outputs.issue_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          accepted_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          marker="$(jq -nc \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg accepted_at "$accepted_at" \
+            --arg run_url "$run_url" \
+            --arg runtime_origin "$RUNTIME_ORIGIN" \
+            '{
+              schema_version: 1,
+              source_sha: $source_sha,
+              accepted: true,
+              accepted_at: $accepted_at,
+              workflow_run: $run_url,
+              runtime_origin: $runtime_origin
+            }')"
+
+          if [ -n "$STATE_ISSUE_NUMBER" ]; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/${STATE_ISSUE_NUMBER}" \
+              -f body="$marker" >/dev/null
+          else
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/issues" \
+              -f title="$STATE_ISSUE_TITLE" \
+              -f body="$marker" >/dev/null
+          fi
+
+          echo "ACCEPTED: ${SOURCE_SHA}" >> "$GITHUB_STEP_SUMMARY"
