@@ -11,6 +11,8 @@ WORKFLOW = Path(".github/workflows/reconcile.yml")
 def validate(text: str) -> None:
     required = [
         "workflow_dispatch:",
+        "repository_dispatch:",
+        "types: [composer-reconcile]",
         'cron: "55 * * * *"',
         "SOURCE_REPO: academic-door/academic-door-composer",
         "environment: production",
@@ -35,7 +37,6 @@ def validate(text: str) -> None:
     forbidden_triggers = [
         "pull_request:",
         "pull_request_target:",
-        "repository_dispatch:",
         "issue_comment:",
         "workflow_run:",
     ]
@@ -48,6 +49,7 @@ def validate(text: str) -> None:
         "repository: ${{",
         "ref: ${{ inputs.",
         "github.event.pull_request",
+        "github.event.client_payload",
     ]
     present = [value for value in forbidden if value in text]
     if present:

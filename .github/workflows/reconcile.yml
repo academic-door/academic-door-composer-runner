@@ -2,6 +2,8 @@ name: Reconcile Composer production
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [composer-reconcile]
   schedule:
     - cron: "55 * * * *"
 
