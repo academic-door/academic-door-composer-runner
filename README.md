@@ -12,8 +12,8 @@ When the public repository exists, copy the contents of this directory to its re
 
 - Fixed private source: `academic-door/academic-door-composer`.
 - Source credential: Composer repository only, Contents read-only.
-- No arbitrary repository/ref/workflow input.
-- Production reconcile triggers: hourly offset schedule + owner `workflow_dispatch`.
+- No arbitrary repository/ref/workflow input; dispatch payload is not consumed by the production controller.
+- Production reconcile triggers: request-only `repository_dispatch` (`composer-reconcile`) + hourly offset schedule + owner `workflow_dispatch`.
 - Production secrets are never available to PR/fork workflows.
 - Private checkout uses `persist-credentials: false` and exists only in the ephemeral runner workspace.
 - No private Composer payload is committed or uploaded as an artifact.
