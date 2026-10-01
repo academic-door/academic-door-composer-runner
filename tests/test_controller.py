@@ -36,6 +36,16 @@ class ControllerContractTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             module.validate(mutated)
 
+    def test_repository_dispatch_is_fixed_and_payload_is_not_consumed(self) -> None:
+        self.assertIn("repository_dispatch:", self.workflow)
+        self.assertIn("types: [composer-reconcile]", self.workflow)
+        self.assertNotIn("github.event.client_payload", self.workflow)
+
+    def test_client_payload_influence_is_rejected(self) -> None:
+        mutated = self.workflow + "\n# github.event.client_payload.ref\n"
+        with self.assertRaises(SystemExit):
+            module.validate(mutated)
+
     def test_workflow_run_trigger_is_rejected_but_marker_key_is_allowed(self) -> None:
         module.validate(self.workflow)
         mutated = self.workflow.replace(
